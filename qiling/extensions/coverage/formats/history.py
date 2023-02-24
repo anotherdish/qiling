@@ -2,15 +2,18 @@ from typing import List
 from qiling import Qiling
 from qiling.core_hooks_types import HookRet
 import re
+from capstone import CsInsn, Cs
 
 class History:
     history_hook_handle: HookRet = None
-    history: List[int] = []
+    history: List[CsInsn] = []
     ql: Qiling
+    md: Cs
 
     def __init__(self, ql: Qiling) -> None:
         self.ql = ql
         self.track_block_coverage()
+        self.md = ql.arch.disassembler
 
     def clear_history(self) -> None:
         """Clears the current state of the history 
@@ -37,7 +40,13 @@ class History:
             self.clear_hooks()
         
         def __hook_block(ql, address, size):
-            self.history.append(address)
+            #0x10 is way more than enough bytes to grab a single instruction
+            ins_bytes = ql.mem.read(address, 0x10)
+            try:                
+                self.history.append(next(self.md.disasm(ins_bytes, address)))
+            except StopIteration: 
+                #if this ever happens, then the unicorn/qiling is going to crash because it tried to execute an instruction that it cant, so we are just not going to do anything
+                pass
 
         self.history_hook_handle = self.ql.hook_block(__hook_block)
 
@@ -49,20 +58,26 @@ class History:
         """
         if self.history_hook_handle:
             self.clear_hooks()
-        
+
         def __hook_block(ql, address, size):
-            self.history.append(address)
+            #0x10 is way more than enough bytes to grab a single instruction
+            ins_bytes = ql.mem.read(address, 0x10)
+            try:                
+                self.history.append(next(self.md.disasm(ins_bytes, address)))
+            except StopIteration: 
+                #if this ever happens, then the unicorn/qiling is going to crash because it tried to execute an instruction that it cant, so we are just not going to do anything
+                pass
 
         self.history_hook_handle = self.ql.hook_code(__hook_block)
 
-    def get_ins_only_lib(self, libs: List[str]) -> List[int]:
+    def get_ins_only_lib(self, libs: List[str]) -> List[CsInsn]:
         """Returns a list of addresses that have been executed that are only in mmaps for objects that match the regex of items in the list
         
         Args:
             libs (List[str]): A list of regex strings to match against the library names in the memory maps
 
         Returns:
-            List[int]: A list of addresses that have been executed and in the memory maps that match the regex
+            List[capstone.CsInsn]: A list of CsInsn that have been executed and are only in the memory maps that match the regex
 
         Examples:
             >>> history.get_ins_only_lib([".*libc.so.*", ".*libpthread.so.*"])
@@ -70,16 +85,16 @@ class History:
 
         executable_maps = self.get_regex_matching_exec_maps(libs)
         
-        return [x for x in self.history if any([x >= start and x <= end for start, end, _, _, _ in executable_maps])]
+        return [x for x in self.history if any([x.address >= start and x.address <= end for start, end, _, _, _ in executable_maps])]
 
-    def get_ins_exclude_lib(self, libs: list) -> List:
+    def get_ins_exclude_lib(self, libs: list) -> List[CsInsn]:
         '''Returns a list of history instructions that are not in the libraries that match the regex in the libs list
         
         Args:
             libs (List): A list of regex strings to match against the library names in the memory maps
         
         Returns:
-            List: A list of addresses that have been executed and are not in the memory maps that match the regex
+            List[capstone.CsInsn]: A list of CsInsn that have been executed and are not in the memory maps that match the regex
 
         Examples:
             >>> history.get_ins_exclude_lib([".*libc.so.*", ".*libpthread.so.*"])
@@ -90,7 +105,7 @@ class History:
         for h in self.history:
             save = True
             for start, end, _, _, _ in executable_maps:
-                if h >= start and h <= end:
+                if h.address >= start and h.address <= end:
                     save = False
                     break
 
@@ -99,11 +114,11 @@ class History:
         return instructions 
 
     
-    def get_mem_map_from_addr(self, ins: int) -> tuple:
+    def get_mem_map_from_addr(self, ins) -> tuple:
         '''Returns the memory map that contains the instruction
 
         Args:
-            ins (int): The instruction address to search for
+            ins: The instruction address to search for, can be either an int or a capstone.CsInsn
 
         Returns:
             tuple: A tuple that contains the memory map that contains the instruction
@@ -112,6 +127,11 @@ class History:
         Examples: 
             >>> history.get_mem_map_from_addr(0x7ffff7dd1b97)
         '''
+
+        if isinstance(ins, CsInsn):
+            ins = ins.address
+
+        assert isinstance(ins, int)
 
         #get the memory map that contains the instruction
         mem_map = [x for x in self.ql.mem.get_mapinfo() if x[0] <= ins and x[1] >= ins]
